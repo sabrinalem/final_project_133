@@ -1,0 +1,856 @@
+---
+title: "Music Popularity Audio Feature Trends"
+author: "Sabrina Lem"
+output:
+    html_document:
+      toc: true
+      toc_float: true
+      code_folding: show
+---
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidymodels)
+library(tidyverse)
+library(ggplot2)
+library(corrplot)
+library(dplyr, warn.conflicts = FALSE)
+library(gridExtra)
+library(knitr)
+library(cowplot)
+library(MASS)
+library(reshape2)
+library(reshape)
+library(kableExtra)
+library(xgboost)
+library(ranger)
+library(rpart.plot)
+library(kknn)
+library(glmnet)
+library(kernlab)
+data <- read_csv("data/master_data.csv")
+```
+
+## Introduction
+We listen to music in numerous ways: emotionally, analytically (for production and instrumental technique), narratively (for a story). So with all of these factors, what makes a good song? This project will try to predict music popularity (using The Grammy's Recording Academy and Billboard Top Charts historical data) based on Spotify-Audio-features (AFTS). Detailed below and even further in the codebook, AFTS capture the different ways we listen to music. We will run (1) a classification analysis on the Grammy's data and (2) a regression analysis on the Billboard's data.
+
+### Why Use Grammys and Billboards Data?
+Note: See the Data Collection for a more detailed explanation on how these records were extracted. 
+The Recording Academy's Grammy Awards are the most esteemed music awards and the only peer-recognized awards in the industry to date. Collected for this project are the historical "Song of the Year" nominations and winners from 1960-2021. The Billboard Charts are another measure of music popularity based off of sales, radio play, and streaming. In this data set, we have the historical annual Top 100 Year-End charts from 1960-2021. We will try to predict two things: (1) What level of AFTS are associated with Grammy nominations and wins for Song of the Year. (2) What level of AFTS are associated with Billboards positioning (1 to 100, 1 being the most popular). Between these two measurements, The Grammy's and Billboard's data, we capture both a high-level critical view as well as the public consensus for music popularity. 
+
+<a href=https://www.grammy.com/awards/64th-annual-grammy-awards-2021>See the most recent Grammy's Awards Nominations/Winners (2021)</a>
+
+<a href=https://www.billboard.com/charts/year-end/hot-100-songs/>See the most recent Billboard's Year-End Top Charts (2021)</a>
+
+### Spotify Audio Features
+Note: See the Data Collection for a more detailed explanation on how these records were extracted. 
+Spotify API allows you to extract several audio features for each song in their database. These values are based off of a machine learning audio analysis process. For this project we will use the following selected AFTS: acousticness, danceability, energy, instrumentalness, liveness, loudness, speechiness, tempo, and valence. For a detailed description of each othese variables, please refer to the codebook in my zipped files and/or <a href=https://developer.spotify.com/documentation/web-api/reference/#/operations/get-audio-features>this link</a>. Overall, these characteristics together captures the way we listen to music (analytically, narratively, emotionally). Please visit <a href="https://developer.spotify.com/documentation/web-api/"> The Spotify Developers documentation</a> to learn more about the Spotify API.
+
+### Data Collection and Web Scraper
+The data collection for this project required a couple steps. The first was to create a data frame that combined each year of nominations/winners at the Grammy's and Billboard's Rankings. I found annnual CSVs for each year from 1960 to 2021 for sources through Wikipedia. For Grammy's data I manually added a the `win` variable and year. For the Billboard's data, the position was already a column, so I only added `year`. So at this point I had 2 data sets: 1 for Grammy's data, and 1 for Billboards data. I then wrote a python function that merged these two data sets. Please see the manage.py file in my zipped files for details. This basically matched or appended the Grammy's data to the Billboard's data. Thus each row had a song name, artist name, position ranking, and Grammy's status. For songs that were not on the Billboard's charts but were nominated were assigned a ranking of `101.` I added a `decade` variable for EDA purposes. In this preliminary data set, there were around 6300 observations. Next, I created a Python app that connected to Spotify API. This collection process took a couple weeks due to run-time and the amount of calls! My computer did not enjoy processing everything. Please see the collect.py file in my zipped files. Essentially this app took each row's song name and artist name from the preliminary data set and queried the Spotify data base for AFTS, and then if the song was found AFTS values were filled in for respective columns. Since, some names were spelled incorrectly from Wikipedia, I had to double check this data frame. So in this final step, I double checked missing data manually and filled in AFTS where I could. However, there were still about twenty songs that could not be found in Spotify. I decided to drop these observations because AFTS are essential. 
+
+
+## Exploratory Data Analysis
+
+### Data Frame Dimensions
+```{r}
+dim(data)
+```
+There are 6291 rows and 15 columns. Each observation is a song. 
+
+A brief description of some of the variables are as follows:
+
+- `songname` : Name of the song 
+
+- `artistname` : Artist name(s) of the song 
+
+- `year`: year of rating/award 
+
+- `decade` : decade of rating/award
+
+- `position`: position on the Billboards chart (1 to 100{1 being best}, 101{if not on chart}) 
+
+- `win`: indicator for Grammy Song of the Year distinction (2{won}, 0{nominated}, 3{otherwise}) 
+
+- `audio feature variables (AFTS)`: Spotify rated audio feature variables, see codebook for specifics 
+  + `acousticness`: how acoustic the song is, rating 0.00-1.00, 1.00 being most acoustic
+  + `danceability`: how suitable a song is to dance to, rating 0.00-1.00, 1.00 being more danceable
+  + `energy`: how intense, noisy, loud, and fast a song is, rating 0.00-1.00, 1.00 being most energetic
+  + `instrumentalness`: predicts whether a track contains mostly instruments (no vocals) rating 0.00-1.00, 1.00 being mostly instruments
+  + `liveness`: how upbeat the song is, rating 0.00-1.00, 1.00 being more upbeat
+  + `loudness`: on average how loud the song is, measured in decibels 
+  + `speechiness`: how spoken the song is, rating 0.00-1.00, 1.00 being mostly spoken
+  + `tempo`: on average the estimated tempo of the song, measured in beats per minute
+  + `valence`: how happy/positive sounding the song is, rating 0.00-1.00, 1.00 having more valence
+  
+
+*see codebook in zipped files for more details on audio features and the other variables*
+
+### Data Cleaning
+Due to the web scraping process, the data frame is fairly tidy. Here we will convert nominal variables to factors, make any level adjustments, and clean up any other aspects of the data that will improve the efficiency of the analysis.
+
+- convert year, decade, win variables to factors
+And here are the first 50 rows of the dataset!
+```{r}
+data$year <- as.factor(data$year)
+data$win <- as.factor(data$win)
+data$decade <- as.factor(data$decade)
+levels(data$win) <- c("none", "nominated", "won")
+levels(data$decade) <- c("60s", "70s", "80s", "90s", "200s", "2010s", "2020s")
+
+music_hist <- data
+head(music_hist, n = 50) %>%
+  kable %>%
+  kable_styling("striped", full_width = F) %>%
+  scroll_box(width = '700px', height = "300px")
+```
+
+During manual check of data, I removed songs that were not in the Spotify database. This should have eliminated any chance of missing variables. Let's double check for NA values. If present, drop the columns.
+
+- check for NA values
+```{r}
+apply(data, 2, function(x) any(is.na(x)))
+```
+There are no missing values. We are ready to investigate how our variables interact with each other
+
+### Audio Features Summary 
+Let's pivot the data from wide to long so that all AFTS are under one variable, `ranking`. This will allow me to build graphics better during this EDA. Here are the first 50 rows of that reshaped data set.
+```{r , class.source = 'fold-hide'}
+#pivoted music_hist frame for further investigation
+data_mod <- music_hist %>%
+  pivot_longer(
+    cols = c("acousticness", "danceability", "energy", "instrumentalness",
+             "liveness", "loudness", "speechiness", "tempo", "valence"),
+    names_to = "aft", 
+    values_to = "rating"
+  )
+head(data_mod, n = 50) %>%
+  kable %>%
+  kable_styling("striped", full_width = F) %>%
+  scroll_box(width = '700px', height = "300px")
+```
+
+- Audio feature averages for the complete data set
+```{r, class.source = 'fold-hide'}
+aft_avg <- data_mod %>% group_by(aft) %>% 
+  summarise_at(vars(rating), list(rating = mean))
+aft_avg %>%
+  kable %>%
+  kable_styling("striped", full_width = F) 
+```
+- Audio Feature Summary
+Here is a quick glimpse at the complete data frame averages of the AFTS rated 0-1.00.
+```{r, class.source = 'fold-hide'}
+aft_hist <- ggplot(data=aft_avg[-c(6,8),], aes(reorder(x= aft, -rating),
+                                           y=rating, fill=aft)) +
+  geom_bar(stat="identity") + 
+  xlab("Audio Feature") +
+  ylab("Spotify Rating (0.00-1.0)")
+aft_hist
+```
+
+
+
+Here we will examine how audio features interact with each other.
+\
+- Correlation matrix of audio features
+```{r}
+music_hist[-c(4)] %>%
+  dplyr::select(where(is.numeric)) %>%
+  cor() %>%
+  corrplot(type="lower", diag= FALSE, method = 'color')
+```
+
+
+### Decades Summary of Audio Features
+Music has changed drastically over time. Thus audio feature trends may have  fluctuated over time. Let's explore a decade-decade comparison of audio feature averages. It is important to consider if year should be controlled for/is an influential variable.
+```{r, class.source = 'fold-hide'} 
+#Decades-Audio Feature Table:
+options(dplyr.summarise.inform = FALSE)
+
+dec_avg <- data_mod[-c(1,2,3,5,6)] %>%
+  group_by(decade,aft) %>%
+  dplyr::summarise(mean = mean(rating))
+
+dec_table <- data.frame(dec_avg)
+dec_table <- reshape2::dcast(dec_avg, decade ~ aft)
+
+dec_table %>%
+  kable %>%
+  kable_styling("striped", full_width = F) %>%
+  scroll_box(width = '700px', height = "300px")
+```
+\
+
+- Plot of audio feature - decade average overtime:
+
+```{r, class.source = 'fold-hide'}
+acous_df <- subset(data_mod[-c(1,2,3,5,6)], aft == 'acousticness')
+acous_dec <- ggplot(acous_df) +
+  geom_boxplot(aes(x=aft, y=rating, color = decade))+
+  theme(legend.position="none")
+
+dance_df <- subset(data_mod[-c(1,2,3,5,6)], aft == 'danceability')
+dance_dec <- ggplot(dance_df) +
+  geom_boxplot(aes(x=aft, y=rating, color = decade))+
+  theme(legend.position="none")
+
+energy_df <- subset(data_mod[-c(1,2,3,5,6)], aft == 'energy')
+energy_dec <- ggplot(energy_df) +
+  geom_boxplot(aes(x=aft, y=rating, color = decade))+
+  theme(legend.position="none")
+
+instrum_df <- subset(data_mod[-c(1,2,3,5,6)], aft == 'instrumentalness')
+instrum_dec <- ggplot(instrum_df) +
+  geom_boxplot(aes(x=aft, y=rating, color = decade))+
+  theme(legend.position="none")
+
+live_df <- subset(data_mod[-c(1,2,3,5,6)], aft == 'liveness')
+live_dec <- ggplot(live_df) +
+  geom_boxplot(aes(x=aft, y=rating, color = decade))+
+  theme(legend.position="none")
+
+loud_df <- subset(data_mod[-c(1,2,3,5,6)], aft == 'loudness')
+loud_dec <- ggplot(loud_df) +
+  geom_boxplot(aes(x=aft, y=rating, color = decade))+
+  theme(legend.position="none")
+
+speech_df <- subset(data_mod[-c(1,2,3,5,6)], aft == 'speechiness')
+speech_dec <- ggplot(speech_df) +
+  geom_boxplot(aes(x=aft, y=rating, color = decade))+
+  theme(legend.position="none")
+
+tempo_df <- subset(data_mod[-c(1,2,3,5,6)], aft == 'tempo')
+tempo_dec <- ggplot(tempo_df) +
+  geom_boxplot(aes(x=aft, y=rating, color = decade))+
+  theme(legend.position="none")
+
+val_df <- subset(data_mod[-c(1,2,3,5,6)], aft == 'valence')
+val_dec <- ggplot(val_df) +
+  geom_boxplot(aes(x=aft, y=rating, color = decade))+
+  theme(legend.position="none")
+
+dummy_dec <- ggplot(val_df) +
+  geom_boxplot(aes(x=aft, y=rating, color = decade))+
+  theme(legend.direction = "vertical")
+leg <- cowplot::get_legend(dummy_dec) 
+
+r1 <- plot_grid(acous_dec, dance_dec)
+r2 <- plot_grid(energy_dec, instrum_dec)
+r3 <- plot_grid(live_dec, speech_dec)
+r4 <- plot_grid(val_dec, tempo_dec)
+r5 <- plot_grid(leg, loud_dec)
+r5
+plot_grid(r1,r2, nrow = 2)
+plot_grid(r3,r4, nrow = 2)
+```
+There are some obvious changes in the decade averages seen through these boxplots for some AFTS. Overtime songs have certainly become more loud. I am assuming this is due to technology. Song have become less acoustic. This is probably also due to the new wave of electronic technology and insturmentation. Valence (or the happiness of a song) seems to be decreasing. This is an interesting feature to note. The other AFTS don't seems to have much change or a certain trend overtime.Overall, while some AFTS on average don't change much over time, there are some that certainly do. We mark music by a decade: 60's is Rock n Roll, 70's Disco, 80's is.. ambigious, etc. Thus, as we can see there are some AFTS with distinct decade features. This should be considered when building the models. 
+
+### Billbaords Summary of Audio Features 
+Let's explore how ranking on the Billboards Year-End chart relate to the AFTS on average. It would be interesting to see if there are any obvious trends as to what puts a song near the top 10. 
+```{r, class.source = 'fold-hide'}
+bill<-data_mod %>%
+  dplyr::select(-c(1,2,3,4,6)) %>%
+  group_by(position, aft) %>%
+  summarise_at(vars(rating), list(rating = mean))
+
+acous_b <- bill[bill$aft %in% "acousticness", ]
+b1<- ggplot(acous_b, aes(x = position, y = rating)) +
+  geom_line() +
+  geom_smooth(method = lm) + 
+  labs(title = "acousticness")
+
+dance_b <- bill[bill$aft %in% "danceability", ]
+b2 <- ggplot(dance_b, aes(x = position, y = rating)) +
+  geom_line() +
+  geom_smooth(method = lm) + 
+  labs(title = "danceability")
+
+energy_b <- bill[bill$aft %in% "energy", ]
+b3 <- ggplot(energy_b, aes(x = position, y = rating)) +
+  geom_line() +
+  geom_smooth(method = lm)+ 
+  labs(title = "energy")
+
+instrum_b <- bill[bill$aft %in% "instrumentalness", ]
+b4 <- ggplot(instrum_b, aes(x = position, y = rating)) +
+  geom_line() +
+  geom_smooth(method = lm) + 
+  labs(title = "instrumentalness")
+
+live_b <- bill[bill$aft %in% "liveness", ]
+b5 <- ggplot(live_b, aes(x = position, y = rating)) +
+  geom_line() +
+  geom_smooth(method = lm) + 
+  labs(title = "liveness")
+
+speech_b <- bill[bill$aft %in% "speechiness", ]
+b6 <-ggplot(speech_b, aes(x = position, y = rating)) +
+  geom_line() +
+  geom_smooth(method = lm) + 
+  labs(title = "speechiness")
+
+val_b <- bill[bill$aft %in% "valence", ]
+b7 <- ggplot(val_b, aes(x = position, y = rating)) +
+  geom_line() +
+  geom_smooth(method = lm) + 
+  labs(title = "valence")
+
+tempo_b <- bill[bill$aft %in% "tempo",]
+b8 <- ggplot(tempo_b, aes(x = position, y = rating)) +
+  geom_line() +
+  geom_smooth(method = lm) + 
+  labs(title = "tempo")
+
+loud_b <- bill[bill$aft %in% "loudness",]
+b9 <- ggplot(loud_b, aes(x = position, y = rating)) +
+  geom_line() +
+  geom_smooth(method = lm) + 
+  labs(title = "loudness")
+
+plot_grid(b1,b2,b3,b4,b5,b6,b7,b8,b9, nrow = 3)
+```
+\
+There are not very noticable trends in the ranking of the Billboards Top Charts and the AFTS. Most noticeably is the negative relationship in danceability and loudness with ranking. So perhaps more popular songs tend to be more danceable and louder on average.
+
+### Winners and Nominations Summary
+Next let's take a look at some density histograms for the AFTS, grouped by Grammy status. Here we can see if the distribution for AFTS is different at a glance for each audio feature. This may give insight as to if we can expect audio features to be good predictors for the Grammy's Song of the Year.
+```{r, class.source = 'fold-hide'}
+gram<-data_mod %>%
+  dplyr::select(-c(1,2,3,4,5)) 
+
+acous_g <- gram[gram$aft %in% "acousticness", ]
+g1 <- ggplot(acous_g, aes(x=rating, group=win, fill = win)) +
+  geom_density(adjust = 2, alpha = 0.4) +
+  theme(legend.position="none")  +
+  labs(title = "acousticness")
+
+dance_g <- gram[gram$aft %in% "danceability", ]
+g2 <- ggplot(dance_g, aes(x=rating, group=win, fill = win)) +
+  geom_density(adjust = 2, alpha = 0.4) +
+  theme(legend.position="none") +
+  labs(title ="danceability")
+
+energy_g <- gram[gram$aft %in% "energy", ]
+g3 <- ggplot(energy_g, aes(x=rating, group=win, fill = win)) +
+  geom_density(adjust = 2, alpha = 0.4) +
+  theme(legend.position="none") +
+  labs(title ="energy")
+
+instrum_g <- gram[gram$aft %in% "instrumentalness", ]
+g4 <- ggplot(instrum_g, aes(x=rating, group=win, fill = win)) +
+  geom_density(adjust = 2, alpha = 0.4) +
+  theme(legend.position="none") +
+  labs(title ="instrumentalness")
+
+live_g <- gram[gram$aft %in% "liveness", ]
+g5 <- ggplot(live_g, aes(x=rating, group=win, fill = win)) +
+  geom_density(adjust = 2, alpha = 0.4) +
+  theme(legend.position="none") +
+  labs(title ="liveness")
+
+speech_g <- gram[gram$aft %in% "speechiness", ]
+g6 <- ggplot(speech_g, aes(x=rating, group=win, fill = win)) +
+  geom_density(adjust = 2, alpha = 0.4) +
+  theme(legend.position="none") +
+  labs(title = "speechiness")
+
+val_g <- gram[gram$aft %in% "valence", ]
+g7 <- ggplot(val_g, aes(x=rating, group=win, fill = win)) +
+  geom_density(adjust = 2, alpha = 0.4) +
+  theme(legend.position="none") +
+  labs(title = "valence")
+
+tempo_g <- gram[gram$aft %in% "tempo", ]
+g8 <- ggplot(tempo_g, aes(x=rating, group=win, fill = win)) +
+  geom_density(adjust = 2, alpha = 0.4) +
+  theme(legend.position="none") +
+  labs(title = "tempo")
+
+loud_g <- gram[gram$aft %in% "loudness", ]
+g9 <- ggplot(loud_g, aes(x=rating, group=win, fill = win)) +
+  geom_density(adjust = 2, alpha = 0.4) +
+  theme(legend.position="none") +
+  labs(title = "loudness")
+
+gdummy <- ggplot(acous_g, aes(x=rating, group=win, fill = win)) +
+  geom_density(adjust = 2, alpha = 0.4) 
+  
+leg2 <- legend <- cowplot::get_legend(gdummy)
+
+x1 <- plot_grid(leg2,g9)
+x2 <- plot_grid(g1,g2)
+x3 <- plot_grid(g3,g4)
+x4 <- plot_grid(g5,g6)
+x5 <- plot_grid(g7,g8)
+x1
+plot_grid(x2,x3, nrow = 2)
+plot_grid(x4,x5, nrow = 2)
+```
+\
+The AFTS each have a very similar shape for whether the song won, is nominated, or neither for Song of the Year. Thus it may be fair to think that our models may have a hard time predicting the categories. That said, let's check out a few classification models, and see if AFTS are good predictors for Grammy Song of the Year status. 
+
+## Grammy Nominations & Winners: Classification
+Our first set of models will intend to predict the Grammy's Song of the Year status. We wll use the following protocol:
+
+- Split the data, stratifying on the variable 'win' (Grammy Song of the Year status)
+- Fold the data for cross validation (using 10 folds)
+- Create a recipe predicting 'win' using the all the AFTS plus some interaction variables 
+- Fit 4 models (Random Forest, Nearest Neighbors, SVM, Lasso)
+- Find the best fit of the four models based on ROC-AUC metric and
+- Build the final model
+- Analyze the test data based on the final model
+
+
+### Data Splitting and Cross-Validation
+Let's begin my splitting our data. We will stratify our training set and test set with the variable 'win'. Since there is only one winner for Song of the Year per Year, we want to make sure these get distributed evenly in our split.
+```{r}
+set.seed(1027)
+grammys_split <- music_hist %>%
+  initial_split(prop = .8, strata = "win")
+grammys_train <- training(grammys_split)
+grammys_test <- testing(grammys_split)
+dim(grammys_train)
+dim(grammys_test)
+```
+- Fold training data into 10 folds
+```{r}
+grammys_folds <- vfold_cv(grammys_train, strata = "win", v = 10)
+```
+### Recipe
+```{r}
+grammys_recipe <- recipe(win ~ year + acousticness + danceability + # predict position using AFTS
+                           energy + instrumentalness + liveness + 
+                           loudness + speechiness + tempo + valence,
+                         grammys_train) %>% 
+  step_dummy(all_nominal_predictors()) %>%  # make sure all nominal variables are noted accordingly
+  step_interact(~energy:acousticness + danceability:acousticness + # created interactions based on the most correlated
+                  valence:danceability + energy:loudness +        # AFTS from the correlation matrix
+                  loudness:acousticness) %>%
+  step_center(all_predictors()) %>%  # Center and scale our variables
+  step_scale(all_predictors()) 
+```
+
+
+### Model Fitting
+Using the recipe above I will fit the following 4 models: 
+
+#### RANDOM FOREST
+In this random forest model we will use the `ranger` engine, set `importance` to `impurity`, set the `mode` to `classification`, and tune `mtry`, `trees`, and `min_n`. Next I set up a tuning grid with ranges for the tuned hyperparamters. Finally, I saved the tuned and fit model.
+```{r,eval= FALSE}
+# Specs and workflow
+rf_spec_g <- rand_forest() %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification") 
+
+rf_wf_g <- workflow() %>%
+  add_model(rf_spec_g %>% 
+              set_args(mtry = tune(),
+                       trees = tune(),
+                       min_n = tune())) %>%
+  add_recipe(grammys_recipe) 
+
+# Tuning grid
+param_grid_rf_g <- grid_regular(mtry(range = c(1,10)), trees(range= c(1,5)),
+                               min_n(range = c(3,10)), levels = 10)
+
+tune_rf_g <- tune_grid(
+  rf_wf_g, 
+  resamples = grammys_folds, 
+  grid = param_grid_rf_g)
+
+# save model (to avoid refitting later)
+save(tune_rf_g, rf_wf_g, file = "data/model_fitting/tune_rf_g.rda")
+```
+
+#### NEAREST NEIGHBORS
+In this nearest neighbors model we will use the `kknn` engine, set the `mode` to `classification`, and tune `neighbors`. Next I set up a tuning grid with a tuned neighbors hyperparameter. Finally, I saved the tuned and fit model.
+```{r, eval=FALSE}
+knn_spec_g <- nearest_neighbor() %>%
+  set_engine("kknn") %>%
+  set_mode("classification")
+
+knn_wf_g <- workflow() %>%
+  add_model(knn_spec_g %>% set_args(neighbors = tune())) %>%
+  add_recipe(grammys_recipe)
+
+# Tuning grid
+param_grid_knn_g <- grid_regular(neighbors(), levels = 10)
+
+tune_knn_g <- tune_grid(
+  knn_wf_g, 
+  resamples = grammys_folds, 
+  grid = param_grid_knn_g)
+
+# save model (to avoid refitting later)
+save(tune_knn_g, knn_wf_g, file = "data/model_fitting/tune_knn_g.rda")
+```
+
+#### SVM 
+In this SVM we will use the `kernlab` engine, set the `mode` to `classification`, and tune `cost complexity`. Next I set up a tuning grid with ranges for the cost hyperparamter. Finally, I saved the tuned and fit model.
+```{r, eval= FALSE}
+# Specs and workflow
+svm_spec_g <- svm_rbf() %>%
+  set_mode("classification") %>%
+  set_engine("kernlab")
+
+svm_wf_g <- workflow() %>%
+  add_model(svm_spec_g %>% set_args(cost = tune())) %>%
+  add_recipe(grammys_recipe)
+
+# Tuning grid
+param_grid_svm_g <- grid_regular(cost(), levels = 10)
+
+tune_svm_g <- tune_grid(
+  svm_wf_g, 
+  resamples = grammys_folds, 
+  grid = param_grid_svm_g)
+
+# Save model (to avoid refitting later)
+save(tune_svm_g, svm_wf_g, file = "data/model_fitting/tune_svm_g.rda")
+```
+
+#### LASSO REGRESSION
+In this Lasso model we will use the `glmnet` engine, set `mixture` to `1` to indicate a Lasso regularization, set the `mode` to `classification`, and tune `penalty`. Next I set up a tuning grid with ranges for the penalty hyperparamter. Finally, I saved the tuned and fit model.
+```{r, eval = FALSE}
+# Specs and Workflow
+lasso_spec_g <- 
+  multinom_reg(penalty = tune(), mixture = 1) %>% 
+  set_mode("classification") %>%
+  set_engine("glmnet")
+
+lasso_wf_g<- workflow() %>% 
+  add_recipe(grammys_recipe) %>% 
+  add_model(lasso_spec_g)
+
+# Tuning grid
+penalty_grid_lasso_g <- grid_regular(penalty(range = c(-10, 10)), levels = 10)
+
+tune_lasso_g <- tune_grid(
+  lasso_wf_g,
+  resamples = grammys_folds, 
+  grid = penalty_grid_lasso_g
+)
+
+# Save model (to avoid refitting later)
+save(tune_lasso_g, lasso_wf_g, file = "data/model_fitting/tune_lasso_g.rda")
+```
+
+### Model Selection and Performance 
+Since we saved our models to avoid refitting, we must load them in the following steps.
+```{r}
+load("data/model_fitting/tune_rf_g.rda")
+load("data/model_fitting/tune_knn_g.rda")
+load("data/model_fitting/tune_svm_g.rda")
+load("data/model_fitting/tune_lasso_g.rda")
+```
+
+#### Random Forest Model
+```{r}
+autoplot(tune_rf_g, metric = 'roc_auc')
+show_best(tune_rf_g, metric = "roc_auc") 
+```
+From the `show_best()`, the highest AUC `mean` is *0.5499734* where `mtry` is *1*, `trees` is *2*, and `min_n` is *3.* This means that this model had ~*55%* correct predictions. This is not that high, but I would say from our EDA this is fairly expected.  
+
+#### KKNN Model
+```{r}
+autoplot(tune_knn_g, metric = 'roc_auc')
+show_best(tune_knn_g, metric = "roc_auc")
+```
+From the `show_best()`, the highest AUC `mean` is *0.5008696* where `neighbors` is *5.* This means that this model had ~*50%* correct predictions. This is even less than the RF model selected above.  
+
+#### SVM Model
+```{r}
+autoplot(tune_svm_g, metric = 'roc_auc')
+show_best(tune_svm_g, metric = "roc_auc")
+```
+From the `show_best()`, the highest AUC `mean` is *0.5978743* where `cost` is *3.17*. This means that this model had ~*60%* correct predictions. That is quite the improvement. So far this is the best model.  
+
+#### Lasso Model
+```{r}
+autoplot(tune_lasso_g, metric = 'roc_auc')
+show_best(tune_lasso_g, metric = "roc_auc")
+```
+From the `show_best()`, the highest AUC `mean` is *0.5* where `penalty` is .0074. This means that this model had ~*50%* correct predictions. This is not the best model to choose from.  
+
+The SVM model performed the best. Let's use this in our final workflow.
+
+### Final Model Building
+Our best performing model was the random forest neighbors model! Next we will create a final workflow with the best nearest neighbors model using `select_best()`.
+```{r, eval = FALSE}
+svm_wf_tuned_g <- svm_wf_g %>%
+  finalize_workflow(select_best(tune_svm_g, metric = 'roc_auc'))
+svm_g_fit <- fit(svm_wf_tuned_g, grammys_train)
+```
+
+### Analysis of Test Set
+We will now fit the finalized model to our test data, and see how it performs!
+```{r, eval = FALSE}
+aug <- augment(svm_g_fit, new_data = grammys_test) 
+tbl_g <- aug %>% roc_auc(truth = win, estimate =c(
+  .pred_none, .pred_nominated, .pred_won))
+roc_curv_g <- aug %>% roc_curve(truth = win, estimate =c(
+  .pred_none, .pred_nominated, .pred_won)) %>% autoplot()
+final_plot_g <- aug %>% conf_mat(truth = win, estimate =.pred_class) %>%
+  autoplot(type = "heatmap")
+
+tbl_g
+roc_curv_g
+final_plot_g
+```
+The model returned a AUC of *0.4931*. This is *~0.1* less than what we got on the training set. The SVM model did not perform too well.
+The ROC curves and confusion matrix visualize this sentiment. It seems that the model only wants to categorize our data into the 'none' bucket. From our EDA, we did see that there was not a huge difference in distribution for the desntiy histograms of the AFTS. So, it seems that perhaps there may not be a big enough difference in the categories' audio features after all. In other words, there is not a great distinction in audio features for nominated and winning songs. The SVM may have chosen the 'none' category because there were far more observations in the entire data set to begin with. While our model does not do a tremendous job predicting anyting, this is telling for the Grammy's. We can conclude that the Grammy's Song of the Year category has a fairly diverse taste in music. Nominations and winners may not follow a trend according to the Recording Academy. 
+
+## Billboards Position: Regression
+While Grammy's categories may not have been distinct enough in AFTS, perhaps the ML models will have better luck with the Billboard's rankings. Thus, our next set of models will intend to predict the Position on the Year-End Billboard' position Note, we left Position as a numerical variable, so some position predictions will be decimal places. We will use the following protocol:
+
+- Split the data, stratifying on the variable 'position' (Year-End Billboard's Charts ranking)
+- Fold the data for cross validation (using 10 folds)
+- Create a recipe predicting 'position' using the all the AFTS plus some interaction variables 
+- Fit 4 models (Random Forest, Nearest Neighbors, SVM, Lasso)
+- Find the best fit of the four models based on RMSE metric and
+- Build the final model
+- Analyze the test data based on the final model
+
+### Data Splitting and Cross-Validation
+- The split
+```{r}
+set.seed(1027)
+billboards_split <- music_hist %>%
+  initial_split(prop = .8, strata = "position")
+billboards_train <- training(billboards_split)
+billboards_test <- testing(billboards_split)
+dim(billboards_train)
+dim(billboards_test)
+```
+- Fold training data into 10 folds
+```{r}
+billboards_folds <- vfold_cv(billboards_train, strata = "position", v = 10)
+```
+
+### Recipe
+```{r}
+billboards_recipe <- recipe(position ~ year + acousticness + danceability + # predict position using AFTS
+                           energy + instrumentalness + liveness + 
+                           loudness + speechiness + tempo + valence,
+                         billboards_train) %>% 
+  step_dummy(all_nominal_predictors()) %>% # make sure all nominal variables are noted accordingly
+  step_interact(~energy:acousticness + danceability:acousticness + # created interactions based on the most correlated
+                  valence:danceability + energy:loudness +         # AFTS from the correlatoin matrix
+                  loudness:acousticness) %>%
+  step_center(all_predictors()) %>%  # Center and scale our variables
+  step_scale(all_predictors()) 
+```
+
+### Model Fitting
+Using the recipe above I will fit the following 4 models: 
+
+#### RANDOM FOREST
+In this random forest model we will use the `ranger` engine, set `importance` to `impurity`, set the `mode` to `regression`, and tune `mtry`, `trees`, and `min_n`. Next I set up a tuning grid with ranges for the tuned hyperparamters. Finally, I saved the tuned and fit model.
+```{r, eval = FALSE}
+rf_spec_b <- rand_forest() %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("regression") 
+
+rf_wf_b <- workflow() %>%
+  add_model(rf_spec_b %>% 
+              set_args(mtry = tune(),
+                       trees = tune(),
+                       min_n = tune())) %>%
+  add_recipe(billboards_recipe) 
+
+param_grid_rf_b <- grid_regular(mtry(range = c(1,10)), trees(range= c(1,5)),
+                               min_n(range = c(3,10)), levels = 10)
+
+tune_rf_b <- tune_grid(
+  rf_wf_b, 
+  resamples = billboards_folds, 
+  grid = param_grid_rf_b)
+
+save(tune_rf_b, rf_wf_b, file = "data/model_fitting/tune_rf_b.rda")
+```
+
+#### NEAREST NEIGHBORS
+In this nearest neighbors model we will use the `kknn` engine, set the `mode` to `regression`, and tune `neighbors`. Next I set up a tuning grid wthe neighbors hyperparameter. Finally, I saved the tuned and fit model.
+```{r, eval = FALSE}
+knn_spec_b <- nearest_neighbor() %>%
+  set_engine("kknn") %>%
+  set_mode("regression")
+
+knn_wf_b <- workflow() %>%
+  add_model(knn_spec_b %>% set_args(neighbors = tune())) %>%
+  add_recipe(billboards_recipe)
+
+param_grid_knn_b <- grid_regular(neighbors(), levels = 10)
+
+tune_knn_b <- tune_grid(
+  knn_wf_b, 
+  resamples = billboards_folds, 
+  grid = param_grid_knn_b
+)
+
+save(tune_knn_b, knn_wf_b, file = "data/model_fitting/tune_knn_b.rda")
+```
+
+#### SVM 
+In this SVM we will use the `kernlab` engine, set the `mode` to `regresion``, and tune `cost complexity`. Next I set up a tuning grid with ranges for the cost hyperparamter. Finally, I saved the tuned and fit model.
+```{r, eval = FALSE}
+svm_spec_b <- svm_rbf() %>%
+  set_mode("regression") %>%
+  set_engine("kernlab")
+
+svm_wf_b <- workflow() %>%
+  add_model(svm_spec_b %>% set_args(cost = tune())) %>%
+  add_recipe(billboards_recipe)
+
+param_grid_svm_b <- grid_regular(cost(), levels = 10)
+
+tune_svm_b <- tune_grid(
+  svm_wf_b, 
+  resamples = billboards_folds, 
+  grid = param_grid_svm_b
+)
+
+save(tune_svm_b, svm_wf_b, file = "data/model_fitting/tune_svm_b.rda")
+```
+
+#### LASSO REGRESSION
+In this Lasso model we will use the `glmnet` engine, set `mixture` to *1* to indicate a Lasso regularization, set the `mode` to `regression``, and tune `penalty`. Next I set up a tuning grid with ranges for the penalty hyperparamter. Finally, I saved the tuned and fit model.
+```{r, eval = FALSE}
+lasso_spec_b <- 
+  linear_reg(penalty = tune(), mixture = 1) %>% 
+  set_mode("regression") %>% 
+  set_engine("glmnet") 
+
+lasso_wf_b <- workflow() %>% 
+  add_recipe(billboards_recipe) %>% 
+  add_model(lasso_spec_b)
+
+penalty_grid_lasso_b <- grid_regular(penalty(), levels = 10)
+
+tune_lasso_b <- tune_grid(
+  lasso_wf_b,
+  resamples = grammys_folds, 
+  grid = penalty_grid_lasso_b
+)
+
+save(tune_lasso_b, lasso_wf_b, file = "data/model_fitting/tune_lasso_b.rda")
+```
+
+### Model Selection and Performance 
+Since we saved our models to avoid refitting, we must load them in the following steps.
+```{r}
+load("data/model_fitting/tune_rf_b.rda")
+load("data/model_fitting/tune_knn_b.rda")
+load("data/model_fitting/tune_svm_b.rda")
+load("data/model_fitting/tune_lasso_b.rda")
+```
+
+#### Random Forest Model
+```{r}
+autoplot(tune_rf_b, metric = 'rmse')
+show_best(tune_rf_b, metric = "rmse")
+```
+From the `show_best()`, the lowest RMSE `mean` is *29.36425* where `mtry` is *1*, `trees` is *5*, and `min_n` is *10.* This is a pretty high value, which may indicate that AFTS may not be great predictors for the Billboard's data either. However, let's look at the other models.
+
+#### KKN Model
+```{r}
+autoplot(tune_knn_b, metric = 'rmse')
+show_best(tune_knn_b, metric = "rmse")
+```
+From the `show_best()`, the lowest RMSE `mean` is *32.11814* where `neighbors` is *10.* The RMSE is higher, so this nearest neighbors model performed worse.
+
+#### SVM Model
+```{r}
+autoplot(tune_svm_b, metric = 'rmse')
+show_best(tune_svm_b, metric = "rmse")
+```
+From the `show_best()`, the lowest RMSE `mean` is *29.34608* where `cost` is *0.0009765625*. The RMSE is lowest thus far, so this is the best model so far.
+
+#### Lasso Model
+```{r}
+autoplot(tune_lasso_b, metric = 'rmse')
+show_best(tune_lasso_b, metric = "rmse")
+```
+From the `show_best()`, the lowest RMSE `mean` is *29.34967* where `penalty` is *1.0*. The RMSE is just a bit higher than our SVM model. 
+
+Thus we will continue with the SVM model in our finalized work flow.
+
+### Final Model Building
+Our best performing model was the nearest neighbors model! Next we will create a final workflow with the best nearest neighbors model using `select_best()`.
+```{r}
+svm_wf_tuned_b <- knn_wf_b %>%
+  finalize_workflow(select_best(tune_svm_b, metric = 'rmse'))
+svm_b_fit <- fit(svm_wf_tuned_b, billboards_train)
+```
+
+### Analysis of Test Set
+
+- SVM performance on test data results (RMSE and $R^2$ values)
+
+```{r}
+billboards_metric <- metric_set(rmse, rsq)
+predictions <- predict(svm_b_fit, new_data = billboards_test) 
+position <- billboards_test['position']
+pos_dec <- billboards_test[c('position','decade')]
+test <- billboards_test[c('songname','artistname', 'year','decade', 'position')]
+model_test_predictions <- cbind(position, predictions)
+mod_test_pred_info <- cbind(test, predictions)
+
+#RMSE of Test
+model_test_predictions %>% 
+  billboards_metric(truth = position, estimate = .pred)
+```
+
+- Songs with the best predictions (smallest difference between actual and predicted values)
+
+
+```{r}
+# adding a difference column
+mod_test_pred_info['difference'] = (model_test_predictions$position 
+- model_test_predictions$.pred)
+
+tbl2a <-mod_test_pred_info %>% mutate(difference = abs(difference))
+
+tbl2b <- tbl2a %>%
+  filter(difference <= 10)
+
+tbl2b %>%
+  kable %>%
+  kable_styling("striped", full_width = F) %>%
+  scroll_box(width = '700px', height = "300px")
+```
+In the first table here we can see that the RMSE on the test data was *29.33202*. This is even better than how the best SVM model performed on our training set, but still very close. We did not overfit! Thus, our model performed pretty well on the test data (relative to the training data). Overall, however, the final model has a pretty high RMSE and very low $R^2$ value of *0.0044*. Like, the Grammy's data, our model is not very predicative of the Billboard's ranking. It seems to fit most values within the `position` of *45* to *60.* However, looking at the second table, we can see some songs where the difference between predicted value and actual value was less than or equal to *10.* There are only 244 out of the 5027 test data points that fall under this criteria. However, maybe we can see if a certain decade has better prediction in the following plot.
+
+```{r}
+# using similar plot from example final project!
+tbl2a %>% filter(difference >= 29.33) %>%
+ggplot(aes(x = position, y = .pred)) +
+  geom_abline(lty=2) + geom_point(alpha = 1) +
+  facet_wrap(~decade)+
+  labs(
+    title = "Test Data Set Predictions vs. Actual",
+    subtitle = "Greater Than 29.33 Difference; 
+    * Note:2020s Panel has less data overall due to sample size of decade",
+    y = "Predicted Possition on Billboard's Year End Top 100",
+    x = "Position on Billboard's Year-End Top 100"
+  )
+
+```
+\
+Since the 2020 Panel is negligent, we can compare the other six decades. There does not seem to be a huge outlying decade in terms of points that exceed an `rmse` greater than *29.33*. So there are no outlying time periods. In sum, we can conclude that The Billboard's data also has a hard time being modeled by AFTS. Perhaps popular music is unpredictable. What goes viral can be unexpected. In the conclusion, I will address further observations and reasons. However, at this point I will leave it at the fact that AFTS alone may are not good indicators for music popularity. 
+
+## Conclusion
+ I wanted to explore, essentially, if there is a 'recipe' for popularity. Are there certain audio features that make a song more likable? The intention of this project was to see if we could determine song popularity using Spotify Audio Features. Popularity was determined by two sources: The Recording Academy's Grammy Song of the Year award and The Billboard's Year-End Top 100. I was hoping to see that Spotify AFTS would be distinct enough to determine Grammy status and Billboard positioning. Since these sources are independent from each other, a best fit model was found for each. Of the 4 classification models that were run to predict Grammy status, the SVM model had the highest AUC value of ~*0.59*. The other three models, Random Forest, Nearest Neighbors, and Lasso all performed similarly. Overall, none of the models had a great fit. The other AUC values did not exceed *0.50*. However, the SVM model did perform marginally better. When fit to the Grammy's test data, the SVM model performed not as well as the training set with an AUC of ~*0.49*. Of the 4 regression models that were run to predict Billboards positions, the SVM model also had the lowest RMSE value: ~*29.346*. Like the Grammy's data the other models, Random Forest, Nearest Neighbors, and Lasso,performed similarly with RMSE values all around *30*. So, when applied to the Billboard's test data, the SVM model returned a very similar RMSE to the training data of *24.33*. 
+\
+ \
+While the SVM models we selected performed similarly on the respective test data, they did not perform well. First looking at the Grammy's SVM model prediction on the test data, we were returned an AUC of ~*0.49*. That is 50% correctness. And as we saw from the confusion matrix, the model only wanted to categorize songs as 'neither nominated or won'. Looking at the Billboard's SVM model prediction on the the test data, we got an RMSE of ~*24.33*. As seen in the results table, most prediction ranged from 40 to 60 while the true values were from 1 to 100. Despite being the best performing models out of the models we fit, the SVM predictions were not ideal. 
+\
+\
+Considering we tested a variety of models and that none of them performed very well, it may be fair to conclude that the AFTS are not a good or sufficient enough predictor variables for music popularity. I think there are a few contributing factors to this. First, the way AFTS are measured may not entirely capture the individuality of a song. Maybe the way a song evokes emotion or it's technical abilities cannot be captured entirely by Spotify's machine learning analysis that determines the AFTS. Music theory, music production, and music cognition are highly complex topics that contribute to the popularity of music: A simple measurement may not accurately distinguish these concepts. Second, I suspect that maybe what's popular in a given year could be a but unpredictable. From our EDA we found that some of the AFTS certainly decade to decade. However, within each decade the range of values had a wide spread. So, controlling for year, we see perhaps AFTS are sort of random. This notion that I am alluding to in a more general sense is that what goes viral (makes the Billboard's Top 100) or what is deemed critically acclaimed (nominated for a Grammy's) is unpredictable in a given year. The landscape of music is fast paced and constantly changing. The next hit could be a sound we've never heard. Who knows? Finally, my last reasoning is that the models we tested may not be complex enough for this data set. While we tested a wide range of models, it is possible that these could all be poor fits. 
+\
+\
+Exploring my love for music through machine learning has been incredibly fun and rewarding. I love working with Spotify API, and I am glad I got to create an app that could extract these features. Furthermore, this exploration has sparked more questions. A year to year or decade to decade comparison on AFTS would be an interesting follow up topic. There is no question that music has evolved overtime, and it would be interesting to explore if AFTS could predict what time period a song is from! Regardless on the success of the these models, I look forward to continuing my investigation on the possible ways AFTS can be used. 
+
+
+
+
